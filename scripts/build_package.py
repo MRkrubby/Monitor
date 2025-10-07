@@ -36,8 +36,10 @@ ALLOWED_SUFFIXES = {
 }
 
 
-def gather_files() -> list[Path]:
-    """Return the tracked files that should be part of the plugin package."""
+EXCLUDE_DIRS = {".git", "dist", "__pycache__"}
+
+
+def _from_git() -> list[Path]:
     git_files = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True)
     selected: list[Path] = []
     for line in git_files.splitlines():
@@ -47,6 +49,29 @@ def gather_files() -> list[Path]:
         if path.name in FORCED or path.suffix in ALLOWED_SUFFIXES:
             selected.append(path)
     return selected
+
+
+def _from_filesystem() -> list[Path]:
+    selected: list[Path] = []
+    for path in ROOT.rglob("*"):
+        if path.is_dir():
+            continue
+        rel = path.relative_to(ROOT)
+        if rel.as_posix() in EXCLUDE:
+            continue
+        if any(part in EXCLUDE_DIRS for part in rel.parts):
+            continue
+        if rel.name in FORCED or rel.suffix in ALLOWED_SUFFIXES:
+            selected.append(rel)
+    return selected
+
+
+def gather_files() -> list[Path]:
+    """Return the files that should be part of the plugin package."""
+    try:
+        return _from_git()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return _from_filesystem()
 
 
 def build(zip_path: Path) -> None:

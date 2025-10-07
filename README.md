@@ -23,7 +23,7 @@ De uitvoer geeft het absolute pad van de root waar ook dit README-bestand en de 
 
 ## Het distributie-zip opnieuw bouwen
 
-Wanneer je wijzigingen aan de plugin hebt doorgevoerd, genereer je met het script hierboven een bijgewerkte distributie. Omdat binaire artefacten niet door GitHub Pull Requests geaccepteerd worden, commit je het ZIP-bestand niet mee; deel in plaats daarvan de output uit `dist/` of maak het pakket opnieuw op de doelomgeving.
+Wanneer je wijzigingen aan de plugin hebt doorgevoerd, genereer je met het script hierboven een bijgewerkte distributie. Omdat binaire artefacten niet door GitHub Pull Requests geaccepteerd worden, commit je het ZIP-bestand niet mee; deel in plaats daarvan de output uit `dist/` of maak het pakket opnieuw op de doelomgeving. Het script werkt ook buiten Git (bijvoorbeeld wanneer je alleen een uitgepakte ZIP hebt) en pakt dan alle relevante bronbestanden automatisch mee.
 
 ## Nieuwe functies in de UI
 
