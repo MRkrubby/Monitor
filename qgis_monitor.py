@@ -7,6 +7,7 @@ import os, sys, time, json, traceback, logging, tempfile, uuid, re
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler, MemoryHandler
 from collections import deque
+from typing import Dict, List
 
 from qgis.core import Qgis, QgsApplication, QgsProject, QgsMapLayer, QgsMessageLog
 from qgis.PyQt.QtWidgets import QApplication
@@ -28,6 +29,10 @@ LOG_DIR = LOG_FILE = ERR_PATH = JSON_PATH = None
 session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 _breadcrumbs = deque(maxlen=400)
 _heartbeat_timer = None
+_watchdog_timer = None
+_last_log_emit = 0.0
+_watchdog_warned = False
+_WATCHDOG_FILTER = None
 
 try:
     import psutil
@@ -58,8 +63,40 @@ def _level():
     return getattr(logging, lvl.upper(), logging.DEBUG)
 
 def crumb(evt:str):
-    try: _breadcrumbs.append(f"{datetime.now(timezone.utc).isoformat()} {evt}")
-    except Exception: pass
+    try:
+        entry = f"{datetime.now(timezone.utc).isoformat()} {evt}"
+        _breadcrumbs.append(entry)
+        logger.debug("Breadcrumb toegevoegd: %s", entry)
+    except Exception:
+        pass
+
+
+def monitor_status() -> Dict[str, object]:
+    """Return a snapshot of the monitor engine state for UI diagnostics."""
+    try:
+        hb_active = bool(_heartbeat_timer and _heartbeat_timer.isActive())
+    except Exception:
+        hb_active = False
+    return {
+        "started": bool(_started),
+        "session_id": session_id,
+        "log_dir": LOG_DIR,
+        "log_file": LOG_FILE,
+        "error_log": ERR_PATH,
+        "json_log": JSON_PATH,
+        "breadcrumbs": len(_breadcrumbs),
+        "heartbeat_active": hb_active,
+    }
+
+
+def get_recent_breadcrumbs(limit: int = 20) -> List[str]:
+    try:
+        lim = max(1, int(limit))
+    except Exception:
+        lim = 20
+    if not _breadcrumbs:
+        return []
+    return list(_breadcrumbs)[-lim:]
 
 _SCRUB = [
     (re.compile(r"C:\\\\Users\\[^\\]+", re.I), r"C:\\Users\\<redacted>"),
@@ -183,6 +220,13 @@ def _setup_paths():
             mf.write(f"FULL={LOG_FILE}\nERRORS={ERR_PATH}\nJSON={JSON_PATH or ''}\nSTARTED={datetime.now(timezone.utc).isoformat()}\n")
     except Exception:
         pass
+    logger.info(
+        "Logpaden ingesteld: full=%s errors=%s json=%s dir=%s",
+        LOG_FILE,
+        ERR_PATH,
+        JSON_PATH,
+        LOG_DIR,
+    )
 
 def _open_rotating(path, level):
     fmt = _fmt()
@@ -203,7 +247,7 @@ def _open_rotating(path, level):
             return None
 
 def _install_handlers():
-    global fh, eh, qh, jh, memh
+    global fh, eh, qh, jh, memh, _WATCHDOG_FILTER, _last_log_emit, _watchdog_warned
     for h in list(logger.handlers):
         try: logger.removeHandler(h); h.close()
         except Exception: pass
@@ -238,6 +282,19 @@ def _install_handlers():
         except Exception: globals()['jh'] = None
     else:
         globals()['jh'] = None
+
+    class _WatchdogTap(logging.Filter):
+        def filter(self, record):
+            globals()['_last_log_emit'] = time.time()
+            return True
+
+    if _WATCHDOG_FILTER is not None:
+        try: logger.removeFilter(_WATCHDOG_FILTER)
+        except Exception: pass
+    _WATCHDOG_FILTER = _WatchdogTap()
+    logger.addFilter(_WATCHDOG_FILTER)
+    _last_log_emit = time.time()
+    _watchdog_warned = False
 
 def force_flush():
     for h in list(logger.handlers):
@@ -497,6 +554,49 @@ def stop_heartbeat():
     if _heartbeat_timer:
         _heartbeat_timer.stop(); _heartbeat_timer = None
 
+def start_watchdog():
+    global _watchdog_timer, _watchdog_warned
+    if not get_setting("watchdog_enabled", bool):
+        return
+    idle_sec = max(10, int(get_setting("watchdog_idle_sec", int) or 60))
+    interval = max(2000, min(10000, int(idle_sec * 1000 / 3)))
+    if _watchdog_timer is None:
+        _watchdog_timer = QTimer()
+        _watchdog_timer.timeout.connect(_watchdog_check)
+    _watchdog_timer.setInterval(interval)
+    _watchdog_timer.start()
+    _watchdog_warned = False
+
+def stop_watchdog():
+    global _watchdog_timer, _WATCHDOG_FILTER
+    if _watchdog_timer:
+        _watchdog_timer.stop(); _watchdog_timer = None
+    if _WATCHDOG_FILTER is not None:
+        try: logger.removeFilter(_WATCHDOG_FILTER)
+        except Exception: pass
+        _WATCHDOG_FILTER = None
+
+def _watchdog_check():
+    global _watchdog_warned
+    if not get_setting("watchdog_enabled", bool):
+        return
+    idle_sec = max(10, int(get_setting("watchdog_idle_sec", int) or 60))
+    delta = time.time() - _last_log_emit
+    if delta >= idle_sec:
+        if not _watchdog_warned:
+            logger.warning(
+                "[Watchdog] geen nieuwe logregels in %ss %s",
+                int(delta),
+                _sample_label("| "),
+            )
+            crumb(f"watchdog:idle {int(delta)}s")
+            _notify_webhook("watchdog_idle", {"idle_seconds": int(delta)})
+            _watchdog_warned = True
+    else:
+        if _watchdog_warned:
+            logger.info("[Watchdog] activiteit hervat na %.1fs", delta)
+        _watchdog_warned = False
+
 def _log_project_summary():
     try:
         prj = QgsProject.instance()
@@ -566,7 +666,9 @@ def qgismonitor_start(iface=None):
         pass
 
     start_heartbeat()
+    start_watchdog()
     _log_project_summary()
+    logger.info("Monitor gestart (iface=%s)", bool(iface))
     QgsMessageLog.logMessage(f"{MONITOR_TAG} actief.", MONITOR_TAG, Qgis.Info)
     _started = True; app.setProperty("qgismonitor_started", True)
 
@@ -582,6 +684,7 @@ def qgismonitor_stop():
     try: QgsApplication.messageLog().messageReceived.disconnect(_on_qgis_message)
     except Exception: pass
     stop_heartbeat()
+    stop_watchdog()
     try:
         if _COALESCE_TIMER: _COALESCE_TIMER.stop(); _COALESCE_TIMER = None
     except Exception: pass
@@ -593,6 +696,7 @@ def qgismonitor_stop():
     except Exception: pass
     try: QgsApplication.instance().setProperty("qgismonitor_started", False)
     except Exception: pass
+    logger.info("Monitor gestopt")
     QgsMessageLog.logMessage(f"{MONITOR_TAG} is gestopt.", MONITOR_TAG, Qgis.Info)
     _started = False
 

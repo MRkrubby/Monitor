@@ -39,6 +39,8 @@ DEFAULTS = {
     # Advanced
     "scrub_enabled": True,
     "heartbeat_sec": 120,
+    "watchdog_enabled": True,
+    "watchdog_idle_sec": 90,
     "max_log_mb": 20,
     "rot_backups": 5,
     "webhook_url": "",

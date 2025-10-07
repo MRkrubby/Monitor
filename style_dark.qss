@@ -1,0 +1,99 @@
+QDialog {
+  background: #1f2125;
+  color: #f1f3f4;
+}
+
+QTabWidget::pane {
+  border: 1px solid #34373c;
+  border-radius: 8px;
+  background: #272a2f;
+  margin-top: 6px;
+}
+
+QTabBar::tab {
+  background: #2f3338;
+  border: 1px solid #34373c;
+  color: #f1f3f4;
+  padding: 6px 14px;
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+}
+
+QTabBar::tab:selected {
+  background: #3a3f46;
+  border-bottom-color: #3a3f46;
+}
+
+QTabBar::tab:hover {
+  background: #353a41;
+}
+
+QGroupBox {
+  font-weight: 600;
+  border: 1px solid #34373c;
+  border-radius: 8px;
+  margin-top: 14px;
+  padding: 8px;
+  color: #e8eaed;
+}
+
+QGroupBox::title {
+  subcontrol-origin: margin;
+  subcontrol-position: top left;
+  padding: 4px 8px;
+  color: #f1f3f4;
+}
+
+QLabel {
+  color: #f1f3f4;
+}
+
+QLineEdit,
+QSpinBox,
+QDoubleSpinBox,
+QComboBox {
+  background: #2b2f34;
+  color: #f1f3f4;
+  padding: 4px 6px;
+  border: 1px solid #3d434a;
+  border-radius: 6px;
+}
+
+QLineEdit:disabled,
+QSpinBox:disabled,
+QDoubleSpinBox:disabled,
+QComboBox:disabled {
+  color: #8a8d91;
+  background: #2a2d30;
+}
+
+QPushButton {
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: #3a4454;
+  border: 1px solid #465166;
+  color: #e8eaed;
+}
+
+QPushButton:hover {
+  background: #425068;
+}
+
+QPushButton:pressed {
+  background: #36455c;
+}
+
+QDialogButtonBox QPushButton {
+  min-width: 86px;
+  background: #4a63d8;
+  border: none;
+  color: white;
+}
+
+QDialogButtonBox QPushButton:hover {
+  background: #5c72e1;
+}
+
+QDialogButtonBox QPushButton:pressed {
+  background: #4259c6;
+}
