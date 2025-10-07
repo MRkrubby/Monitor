@@ -1,0 +1,28 @@
+
+QDialog {
+  background: #fafafa;
+}
+QGroupBox {
+  font-weight: 600;
+  border: 1px solid #e1e1e1;
+  border-radius: 8px;
+  margin-top: 10px;
+}
+QGroupBox::title {
+  subcontrol-origin: margin;
+  subcontrol-position: top left;
+  padding: 4px 8px;
+}
+QLabel {
+  color: #202124;
+}
+QSpinBox, QLineEdit, QComboBox {
+  padding: 2px 4px;
+}
+QPushButton {
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+QPushButton:hover {
+  background: #f0f3ff;
+}

@@ -1,0 +1,12 @@
+[general]
+name=QGIS Monitor Pro
+qgisMinimumVersion=3.28
+description=Geavanceerde QGIS-monitor met moderne UI en uitgebreide logging (rotation, JSONL, breadcrumbs, heartbeat).
+version=3.3.13
+author=Your Team
+email=devnull@example.com
+about=Volledig herschreven: stabiele engine, slanke toolbar, rijke JSONL-context, size-rotatie, breadcrumbs, heartbeat, scrubber en webhookopties.
+icon=icon.png
+category=Plugins
+experimental=False
+deprecated=False
