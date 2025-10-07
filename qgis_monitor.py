@@ -7,7 +7,6 @@ import os, sys, time, json, traceback, logging, tempfile, uuid, re
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler, MemoryHandler
 from collections import deque
-from typing import Dict, List
 
 from qgis.core import Qgis, QgsApplication, QgsProject, QgsMapLayer, QgsMessageLog
 from qgis.PyQt.QtWidgets import QApplication
@@ -59,40 +58,8 @@ def _level():
     return getattr(logging, lvl.upper(), logging.DEBUG)
 
 def crumb(evt:str):
-    try:
-        entry = f"{datetime.now(timezone.utc).isoformat()} {evt}"
-        _breadcrumbs.append(entry)
-        logger.debug("Breadcrumb toegevoegd: %s", entry)
-    except Exception:
-        pass
-
-
-def monitor_status() -> Dict[str, object]:
-    """Return a snapshot of the monitor engine state for UI diagnostics."""
-    try:
-        hb_active = bool(_heartbeat_timer and _heartbeat_timer.isActive())
-    except Exception:
-        hb_active = False
-    return {
-        "started": bool(_started),
-        "session_id": session_id,
-        "log_dir": LOG_DIR,
-        "log_file": LOG_FILE,
-        "error_log": ERR_PATH,
-        "json_log": JSON_PATH,
-        "breadcrumbs": len(_breadcrumbs),
-        "heartbeat_active": hb_active,
-    }
-
-
-def get_recent_breadcrumbs(limit: int = 20) -> List[str]:
-    try:
-        lim = max(1, int(limit))
-    except Exception:
-        lim = 20
-    if not _breadcrumbs:
-        return []
-    return list(_breadcrumbs)[-lim:]
+    try: _breadcrumbs.append(f"{datetime.now(timezone.utc).isoformat()} {evt}")
+    except Exception: pass
 
 _SCRUB = [
     (re.compile(r"C:\\\\Users\\[^\\]+", re.I), r"C:\\Users\\<redacted>"),
@@ -216,13 +183,6 @@ def _setup_paths():
             mf.write(f"FULL={LOG_FILE}\nERRORS={ERR_PATH}\nJSON={JSON_PATH or ''}\nSTARTED={datetime.now(timezone.utc).isoformat()}\n")
     except Exception:
         pass
-    logger.info(
-        "Logpaden ingesteld: full=%s errors=%s json=%s dir=%s",
-        LOG_FILE,
-        ERR_PATH,
-        JSON_PATH,
-        LOG_DIR,
-    )
 
 def _open_rotating(path, level):
     fmt = _fmt()
@@ -607,7 +567,6 @@ def qgismonitor_start(iface=None):
 
     start_heartbeat()
     _log_project_summary()
-    logger.info("Monitor gestart (iface=%s)", bool(iface))
     QgsMessageLog.logMessage(f"{MONITOR_TAG} actief.", MONITOR_TAG, Qgis.Info)
     _started = True; app.setProperty("qgismonitor_started", True)
 
@@ -634,7 +593,6 @@ def qgismonitor_stop():
     except Exception: pass
     try: QgsApplication.instance().setProperty("qgismonitor_started", False)
     except Exception: pass
-    logger.info("Monitor gestopt")
     QgsMessageLog.logMessage(f"{MONITOR_TAG} is gestopt.", MONITOR_TAG, Qgis.Info)
     _started = False
 
