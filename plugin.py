@@ -1,7 +1,23 @@
-# -*- coding: utf-8 -*-
-import glob
+"""QGIS Monitor Pro plugin entry point.
+
+The plugin coordinates three primary responsibilities:
+
+* presenting a toolbar/menu to the user,
+* orchestrating the monitoring engine exposed via :mod:`qgis_monitor`, and
+* providing utilities such as diagnostics, log bundling and settings import.
+
+The previous revisions grew a large amount of imperative code inside
+``initGui``.  The rewrite introduces small helper classes to keep concerns
+isolated and easier to maintain while preserving backwards compatibility for
+QGIS' ``classFactory`` loader.
+"""
+
+from __future__ import annotations
+
 import logging
 import os
+from dataclasses import dataclass
+from typing import Callable, List, Optional
 
 from qgis.PyQt.QtCore import Qt, QTimer, QUrl
 from qgis.PyQt.QtGui import QDesktopServices, QIcon
@@ -29,204 +45,190 @@ from .utils import (
     write_diagnostics_txt,
 )
 
-
 ICON_DIR = os.path.dirname(__file__)
 
 
-def ico(name):
+def _icon(name: str) -> QIcon:
     return QIcon(os.path.join(ICON_DIR, name))
 
 
-class QgisMonitorProPlugin:
-    def __init__(self, iface):
+@dataclass
+class ActionHandle:
+    action: QAction
+    add_to_menu: bool = True
+    add_to_toolbar: bool = False
+
+
+class ActionRegistry:
+    """Tracks created actions so they can be cleaned up reliably."""
+
+    def __init__(self, iface, menu_name: str) -> None:
         self.iface = iface
-        self._live_dock = None
-        self._menu_name = "&QGIS Monitor Pro"
-        self.actions = []
-        self.toolbar = None
-        self._act_live = None
-        self.log = logging.getLogger("QGISMonitorPro.UI")
-        self.log.setLevel(logging.DEBUG)
+        self.menu_name = menu_name
+        self.actions: List[ActionHandle] = []
+        self.toolbar: Optional[QToolBar] = None
 
-    def initGui(self):
-        # Menu actions (met iconen)
-        self.action_settings = QAction(ico("icon_settings.png"), "Instellingen…", self.iface.mainWindow())
-        self.action_settings.triggered.connect(self._open_settings)
-        self.iface.addPluginToMenu(self._menu_name, self.action_settings)
-        self.actions.append(self.action_settings)
-
-        self.action_diag = QAction(ico("icon_diag.png"), "Diagnose uitvoeren → TXT", self.iface.mainWindow())
-        self.action_diag.triggered.connect(self._run_diag)
-        self.iface.addPluginToMenu(self._menu_name, self.action_diag)
-        self.actions.append(self.action_diag)
-
-        self.action_bundle = QAction(ico("icon_diag.png"), "Bundel logs → ZIP", self.iface.mainWindow())
-        self.action_bundle.triggered.connect(self._bundle_logs)
-        self.iface.addPluginToMenu(self._menu_name, self.action_bundle)
-        self.actions.append(self.action_bundle)
-
-        self.action_open = QAction(ico("icon_folder.png"), "Open logmap", self.iface.mainWindow())
-        self.action_open.triggered.connect(self._open_folder)
-        self.iface.addPluginToMenu(self._menu_name, self.action_open)
-        self.actions.append(self.action_open)
-
-        self.action_open_latest = QAction(ico("tab_logging.png"), "Laatste log openen", self.iface.mainWindow())
-        self.action_open_latest.triggered.connect(self._open_latest_log)
-        self.iface.addPluginToMenu(self._menu_name, self.action_open_latest)
-        self.actions.append(self.action_open_latest)
-
-        self.action_toggle = QAction(ico("icon_start.png"), "Start Monitor", self.iface.mainWindow())
-        self.action_toggle.setCheckable(True)
-        self.action_toggle.triggered.connect(self._toggle_monitor)
-        self.iface.addPluginToMenu(self._menu_name, self.action_toggle)
-        self.actions.append(self.action_toggle)
-
-        # Toolbar (slank): alleen hoofdicoon + start/stop
-        mw = self.iface.mainWindow()
-        existing = mw.findChild(QToolBar, "QGISMonitorProToolbar")
+    def ensure_toolbar(self) -> QToolBar:
+        if self.toolbar is not None:
+            return self.toolbar
+        existing = self.iface.mainWindow().findChild(QToolBar, "QGISMonitorProToolbar")
         if existing:
             self.toolbar = existing
-        else:
-            self.toolbar = self.iface.addToolBar("QGIS Monitor Pro")
-            self.toolbar.setObjectName("QGISMonitorProToolbar")
+            return existing
+        toolbar = self.iface.addToolBar("QGIS Monitor Pro")
+        toolbar.setObjectName("QGISMonitorProToolbar")
+        self.toolbar = toolbar
+        return toolbar
 
-        try:
-            for act in list(self.toolbar.actions()):
-                self.toolbar.removeAction(act)
-        except Exception:
-            pass
+    def add(self, action: QAction, *, menu: bool = True, toolbar: bool = False) -> QAction:
+        handle = ActionHandle(action, menu, toolbar)
+        self.actions.append(handle)
+        if menu:
+            self.iface.addPluginToMenu(self.menu_name, action)
+        if toolbar:
+            self.ensure_toolbar().addAction(action)
+        return action
 
-        main_btn = QAction(QIcon(os.path.join(ICON_DIR, "icon.png")), "QGIS Monitor Pro — Instellingen", self.iface.mainWindow())
-        main_btn.triggered.connect(self._open_settings)
-        self.toolbar.addAction(main_btn)
-        self.toolbar.addAction(self.action_toggle)
-
-        # Live Log Viewer action (additive)
-        try:
-            self._act_live = QAction(QgsApplication.getThemeIcon("mActionOpenTable.svg"), "Live Log Viewer", self.iface.mainWindow())
-            self._act_live.triggered.connect(self._open_live)
-            if self.toolbar:
-                self.toolbar.addAction(self._act_live)
-            try:
-                self.iface.addPluginToMenu(self._menu_name, self._act_live)
-                self.actions.append(self._act_live)
-            except Exception:
-                pass
-        except Exception:
-            self._act_live = None
-
-        # Testlogs (menu only)
-        self._act_test = QAction("Genereer testlogs", self.iface.mainWindow())
-        self._act_test.triggered.connect(self._emit_test)
-        self.iface.addPluginToMenu(self._menu_name, self._act_test)
-        self.actions.append(self._act_test)
-
-        self._act_status = QAction(ico("tab_view.png"), "Statusoverzicht", self.iface.mainWindow())
-        self._act_status.triggered.connect(self._show_status)
-        self.iface.addPluginToMenu(self._menu_name, self._act_status)
-        self.actions.append(self._act_status)
-
-        self._act_breadcrumbs = QAction(ico("tab_adv.png"), "Recente gebeurtenissen", self.iface.mainWindow())
-        self._act_breadcrumbs.triggered.connect(self._show_breadcrumbs)
-        self.iface.addPluginToMenu(self._menu_name, self._act_breadcrumbs)
-        self.actions.append(self._act_breadcrumbs)
-
-        self._act_prune = QAction("Opschonen logmap", self.iface.mainWindow())
-        self._act_prune.triggered.connect(self._prune_logs)
-        self.iface.addPluginToMenu(self._menu_name, self._act_prune)
-        self.actions.append(self._act_prune)
-
-        self._act_export = QAction("Exporteer instellingen…", self.iface.mainWindow())
-        self._act_export.triggered.connect(self._export_settings)
-        self.iface.addPluginToMenu(self._menu_name, self._act_export)
-        self.actions.append(self._act_export)
-
-        self._act_import = QAction("Importeer instellingen…", self.iface.mainWindow())
-        self._act_import.triggered.connect(self._import_settings)
-        self.iface.addPluginToMenu(self._menu_name, self._act_import)
-        self.actions.append(self._act_import)
-
-        if bool(get_setting("autostart", bool)):
-            QTimer.singleShot(1000, self._auto_start)
-
-    def unload(self):
-        try:
-            qgismonitor_stop()
-        except Exception:
-            pass
-        for a in self.actions:
-            try:
-                self.iface.removePluginMenu(self._menu_name, a)
-            except Exception:
-                pass
+    def clear(self) -> None:
+        for handle in self.actions:
+            if handle.add_to_menu:
+                try:
+                    self.iface.removePluginMenu(self.menu_name, handle.action)
+                except Exception:
+                    pass
+            if handle.add_to_toolbar and self.toolbar:
+                try:
+                    self.toolbar.removeAction(handle.action)
+                except Exception:
+                    pass
         self.actions.clear()
         if self.toolbar:
             try:
-                for act in list(self.toolbar.actions()):
-                    self.toolbar.removeAction(act)
+                for action in list(self.toolbar.actions()):
+                    self.toolbar.removeAction(action)
             except Exception:
                 pass
             self.toolbar = None
 
-    # ---- UI callbacks ----
-    def _log_action(self, action: str, **kwargs):
-        if kwargs:
-            self.log.info("%s %s", action, kwargs)
-        else:
-            self.log.info(action)
 
-    def _open_settings(self):
+class QgisMonitorProPlugin:
+    def __init__(self, iface) -> None:
+        self.iface = iface
+        self._registry = ActionRegistry(iface, "&QGIS Monitor Pro")
+        self._log = logging.getLogger("QGISMonitorPro.UI")
+        self._log.setLevel(logging.DEBUG)
+        self._live_dock: Optional[LiveLogDock] = None
+        self._toggle_action: Optional[QAction] = None
+
+    # ------------------------------------------------------------------
+    # QGIS entry points
+    # ------------------------------------------------------------------
+
+    def initGui(self) -> None:
+        self._registry.ensure_toolbar()
+        main_button = self._make_action("QGIS Monitor Pro — Instellingen", self._open_settings, "icon.png")
+        self._registry.add(main_button, menu=False, toolbar=True)
+
+        self._toggle_action = QAction(_icon("icon_start.png"), "Start Monitor", self.iface.mainWindow())
+        self._toggle_action.setCheckable(True)
+        self._toggle_action.triggered.connect(self._toggle_monitor)
+        self._registry.add(self._toggle_action, menu=True, toolbar=True)
+
+        self._registry.add(self._make_action("Instellingen…", self._open_settings, "icon_settings.png"))
+        self._registry.add(self._make_action("Diagnose uitvoeren → TXT", self._run_diagnostics, "icon_diag.png"))
+        self._registry.add(self._make_action("Bundel logs → ZIP", self._bundle_logs, "icon_diag.png"))
+        self._registry.add(self._make_action("Open logmap", self._open_folder, "icon_folder.png"))
+        self._registry.add(self._make_action("Laatste log openen", self._open_latest_log, "tab_logging.png"))
+        self._registry.add(self._make_action("Live Log Viewer", self._open_live_view, None), toolbar=True)
+        self._registry.add(self._make_action("Genereer testlogs", self._emit_test_logs, None))
+        self._registry.add(self._make_action("Statusoverzicht", self._show_status, "tab_view.png"))
+        self._registry.add(self._make_action("Recente gebeurtenissen", self._show_breadcrumbs, "tab_adv.png"))
+        self._registry.add(self._make_action("Opschonen logmap", self._prune_logs, None))
+        self._registry.add(self._make_action("Exporteer instellingen…", self._export_settings, None))
+        self._registry.add(self._make_action("Importeer instellingen…", self._import_settings, None))
+
+        if bool(get_setting("autostart", bool)):
+            QTimer.singleShot(1000, self._auto_start)
+
+    def unload(self) -> None:
+        try:
+            qgismonitor_stop()
+        except Exception:
+            pass
+        self._registry.clear()
+        self._live_dock = None
+
+    # ------------------------------------------------------------------
+    # Action helpers
+    # ------------------------------------------------------------------
+
+    def _make_action(self, text: str, slot: Callable, icon_name: Optional[str], toolbar: bool = False) -> QAction:
+        icon = _icon(icon_name) if icon_name else QIcon()
+        action = QAction(icon, text, self.iface.mainWindow())
+        action.triggered.connect(slot)
+        return action
+
+    def _log_action(self, name: str, **payload) -> None:
+        if payload:
+            self._log.info("%s %s", name, payload)
+        else:
+            self._log.info(name)
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+
+    def _open_settings(self) -> None:
         self._log_action("open_settings")
-        dlg = SettingsDialog(self.iface.mainWindow())
-        if dlg.exec_():
-            dlg.apply()
+        dialog = SettingsDialog(self.iface.mainWindow())
+        if dialog.exec_():
+            dialog.apply()
             QMessageBox.information(self.iface.mainWindow(), "QGIS Monitor Pro", "Instellingen opgeslagen.")
-            if self.action_toggle.isChecked():
+            if self._toggle_action and self._toggle_action.isChecked():
                 qgismonitor_stop()
                 QTimer.singleShot(300, lambda: qgismonitor_start(self.iface))
 
-    def _run_diag(self):
+    def _run_diagnostics(self) -> None:
         self._log_action("run_diagnostics")
-        p = write_diagnostics_txt()
-        if p.startswith("ERROR"):
-            QMessageBox.critical(self.iface.mainWindow(), "QGIS Monitor Pro", p)
-        else:
-            self.iface.messageBar().pushSuccess("QGIS Monitor Pro", f"Diagnose geschreven: {p}")
-            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(p)))
+        path = write_diagnostics_txt()
+        if path.startswith("ERROR"):
+            QMessageBox.critical(self.iface.mainWindow(), "QGIS Monitor Pro", path)
+            return
+        self.iface.messageBar().pushSuccess("QGIS Monitor Pro", f"Diagnose geschreven: {path}")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(path)))
 
-    def _bundle_logs(self):
+    def _bundle_logs(self) -> None:
         self._log_action("bundle_logs")
         try:
-            out = os.path.join(get_log_dir(), f"logs_bundle_{QgsApplication.instance().applicationPid()}.zip")
-            ok = make_diagnostics_zip(out)
-            if ok:
-                self.iface.messageBar().pushSuccess("QGIS Monitor Pro", f"Bundle geschreven: {out}")
-                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(out)))
+            out_path = os.path.join(get_log_dir(), f"logs_bundle_{QgsApplication.instance().applicationPid()}.zip")
+            if make_diagnostics_zip(out_path):
+                self.iface.messageBar().pushSuccess("QGIS Monitor Pro", f"Bundle geschreven: {out_path}")
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(out_path)))
             else:
                 QMessageBox.warning(self.iface.mainWindow(), "QGIS Monitor Pro", "Kon de bundel niet schrijven.")
-        except Exception as e:
-            QMessageBox.critical(self.iface.mainWindow(), "QGIS Monitor Pro", str(e))
+        except Exception as exc:
+            QMessageBox.critical(self.iface.mainWindow(), "QGIS Monitor Pro", str(exc))
 
-    def _open_folder(self):
-        self._log_action("open_folder", path=get_log_dir())
-        d = get_log_dir()
-        QDesktopServices.openUrl(QUrl.fromLocalFile(d))
-        self.iface.messageBar().pushInfo("QGIS Monitor Pro", f"Logmap geopend: {d}")
+    def _open_folder(self) -> None:
+        path = get_log_dir()
+        self._log_action("open_folder", path=path)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        self.iface.messageBar().pushInfo("QGIS Monitor Pro", f"Logmap geopend: {path}")
 
-    def _open_latest_log(self):
+    def _open_latest_log(self) -> None:
         self._log_action("open_latest_log")
-        candidates = []
-        if LOG_FILE and os.path.exists(LOG_FILE):
-            candidates.append(LOG_FILE)
-        if ERR_PATH and os.path.exists(ERR_PATH):
-            candidates.append(ERR_PATH)
+        candidates = [LOG_FILE, ERR_PATH]
+        candidates = [c for c in candidates if c and os.path.exists(c)]
         if not candidates:
             try:
+                import glob
+
                 log_dir = get_log_dir()
                 for pattern in ("qgis_full_*.log", "qgis_errors_*.log"):
-                    candidates.extend(sorted(glob.glob(os.path.join(log_dir, pattern)), key=os.path.getmtime, reverse=True))
+                    found = sorted(glob.glob(os.path.join(log_dir, pattern)), key=os.path.getmtime, reverse=True)
+                    candidates.extend(found)
             except Exception as exc:
-                self.log.warning("Kon logbestanden niet ophalen: %s", exc)
+                self._log.warning("Kon logbestanden niet ophalen: %s", exc)
         target = candidates[0] if candidates else None
         if target and os.path.exists(target):
             QDesktopServices.openUrl(QUrl.fromLocalFile(target))
@@ -234,64 +236,63 @@ class QgisMonitorProPlugin:
         else:
             self.iface.messageBar().pushWarning("QGIS Monitor Pro", "Geen logbestand gevonden.")
 
-    def _toggle_monitor(self, checked):
+    def _toggle_monitor(self, checked: bool) -> None:
         self._log_action("toggle_monitor", state=checked)
         if checked:
             try:
                 qgismonitor_start(self.iface)
-                self.action_toggle.setIcon(ico("icon_stop.png"))
-                self.action_toggle.setText("Stop Monitor")
+                self._update_toggle_icon(True)
                 self.iface.messageBar().pushSuccess("QGIS Monitor Pro", "Monitor gestart.")
-            except Exception as e:
-                self.action_toggle.setChecked(False)
-                QMessageBox.critical(self.iface.mainWindow(), "QGIS Monitor Pro", f"Kon de monitor niet starten:\n{e}")
+            except Exception as exc:
+                if self._toggle_action:
+                    self._toggle_action.setChecked(False)
+                QMessageBox.critical(self.iface.mainWindow(), "QGIS Monitor Pro", f"Kon de monitor niet starten:\n{exc}")
         else:
             qgismonitor_stop()
-            self.action_toggle.setIcon(ico("icon_start.png"))
-            self.action_toggle.setText("Start Monitor")
+            self._update_toggle_icon(False)
             self.iface.messageBar().pushSuccess("QGIS Monitor Pro", "Monitor gestopt.")
 
-    def _auto_start(self):
-        if self.action_toggle.isChecked():
+    def _auto_start(self) -> None:
+        if self._toggle_action and self._toggle_action.isChecked():
             return
         try:
-            self._log_action("auto_start")
             qgismonitor_start(self.iface)
-            self.action_toggle.setChecked(True)
-            self.action_toggle.setIcon(ico("icon_stop.png"))
-            self.action_toggle.setText("Stop Monitor")
+            if self._toggle_action:
+                self._toggle_action.setChecked(True)
+            self._update_toggle_icon(True)
             self.iface.messageBar().pushInfo("QGIS Monitor Pro", "Autostart actief.")
-        except Exception as e:
-            self.iface.messageBar().pushWarning("QGIS Monitor Pro", f"Autostart faalde: {e}")
+        except Exception as exc:
+            self.iface.messageBar().pushWarning("QGIS Monitor Pro", f"Autostart faalde: {exc}")
 
-    def _open_live(self):
+    def _open_live_view(self) -> None:
         self._log_action("open_live_view")
         try:
             if self._live_dock is None:
-                self._live_dock = LiveLogDock(self.iface.mainWindow(), get_paths=lambda: (LOG_FILE, ERR_PATH))
+                self._live_dock = LiveLogDock(self.iface.mainWindow(), lambda: (LOG_FILE, ERR_PATH))
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self._live_dock)
             self._live_dock.show()
             self._live_dock.raise_()
-        except Exception as e:
-            self.iface.messageBar().pushWarning("QGIS Monitor Pro", f"Kon Live Log niet openen: {e}")
+        except Exception as exc:
+            self.iface.messageBar().pushWarning("QGIS Monitor Pro", f"Kon Live Log niet openen: {exc}")
 
-    def _emit_test(self):
+    def _emit_test_logs(self) -> None:
         self._log_action("emit_test_logs")
         try:
-            log = logging.getLogger('QGISMonitorPro')
-            log.info('[Test] INFO melding')
-            log.warning('[Test] WARNING melding')
-            log.error('[Test] ERROR melding')
+            log = logging.getLogger("QGISMonitorPro")
+            log.info("[Test] INFO melding")
+            log.warning("[Test] WARNING melding")
+            log.error("[Test] ERROR melding")
             try:
-                raise RuntimeError('Test exception voor errors.log')
-            except Exception as e:
+                raise RuntimeError("Test exception voor errors.log")
+            except Exception as exc:
                 import traceback
-                log.error('[Test] Exception: ' + ''.join(traceback.format_exception_only(type(e), e)).strip())
-            self.iface.messageBar().pushInfo('QGIS Monitor Pro', 'Testlogs geschreven (full/errors/json).')
-        except Exception as e:
-            self.iface.messageBar().pushWarning('QGIS Monitor Pro', f'Testlog mislukt: {e}')
 
-    def _show_status(self):
+                log.error("[Test] Exception: %s", "".join(traceback.format_exception_only(type(exc), exc)).strip())
+            self.iface.messageBar().pushInfo("QGIS Monitor Pro", "Testlogs geschreven (full/errors/json).")
+        except Exception as exc:
+            self.iface.messageBar().pushWarning("QGIS Monitor Pro", f"Testlog mislukt: {exc}")
+
+    def _show_status(self) -> None:
         status = monitor_status()
         self._log_action("show_status", **status)
         lines = [
@@ -309,16 +310,17 @@ class QgisMonitorProPlugin:
         ]
         QMessageBox.information(self.iface.mainWindow(), "QGIS Monitor Pro", "\n".join(lines))
 
-    def _show_breadcrumbs(self):
+    def _show_breadcrumbs(self) -> None:
         crumbs = get_recent_breadcrumbs(20)
         self._log_action("show_breadcrumbs", aantal=len(crumbs))
         if not crumbs:
             QMessageBox.information(self.iface.mainWindow(), "QGIS Monitor Pro", "Geen gebeurtenissen beschikbaar.")
             return
-        text = "\n".join(crumbs)
-        QMessageBox.information(self.iface.mainWindow(), "QGIS Monitor Pro — gebeurtenissen", text)
+        QMessageBox.information(
+            self.iface.mainWindow(), "QGIS Monitor Pro — gebeurtenissen", "\n".join(crumbs)
+        )
 
-    def _prune_logs(self):
+    def _prune_logs(self) -> None:
         self._log_action("prune_logs")
         try:
             prune_logs_now()
@@ -326,7 +328,7 @@ class QgisMonitorProPlugin:
         except Exception as exc:
             self.iface.messageBar().pushWarning("QGIS Monitor Pro", f"Opschonen mislukt: {exc}")
 
-    def _export_settings(self):
+    def _export_settings(self) -> None:
         self._log_action("export_settings")
         path, _ = QFileDialog.getSaveFileName(
             self.iface.mainWindow(),
@@ -341,7 +343,7 @@ class QgisMonitorProPlugin:
         else:
             self.iface.messageBar().pushWarning("QGIS Monitor Pro", "Export mislukt.")
 
-    def _import_settings(self):
+    def _import_settings(self) -> None:
         self._log_action("import_settings")
         path, _ = QFileDialog.getOpenFileName(
             self.iface.mainWindow(),
@@ -352,6 +354,22 @@ class QgisMonitorProPlugin:
         if not path:
             return
         if import_settings_json(path):
-            self.iface.messageBar().pushSuccess("QGIS Monitor Pro", "Instellingen geïmporteerd. Herstart de monitor voor effect.")
+            self.iface.messageBar().pushSuccess(
+                "QGIS Monitor Pro", "Instellingen geïmporteerd. Herstart de monitor voor effect."
+            )
         else:
             self.iface.messageBar().pushWarning("QGIS Monitor Pro", "Import mislukt. Controleer het bestand.")
+
+    def _update_toggle_icon(self, running: bool) -> None:
+        if not self._toggle_action:
+            return
+        if running:
+            self._toggle_action.setIcon(_icon("icon_stop.png"))
+            self._toggle_action.setText("Stop Monitor")
+        else:
+            self._toggle_action.setIcon(_icon("icon_start.png"))
+            self._toggle_action.setText("Start Monitor")
+
+
+__all__ = ["QgisMonitorProPlugin"]
+

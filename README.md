@@ -58,3 +58,13 @@ Elke actie schrijft een logregel in de categorie `QGISMonitorPro.UI`, zodat je i
 De monitor-engine bevat een ingebouwde watchdog die waarschuwt wanneer er langere tijd geen nieuwe logregels verschijnen. De
 timeout is instelbaar via **Advanced → Watchdog** in het instellingenvenster. Wanneer de drempel wordt overschreden, schrijft de
 watchdog een melding naar het log en — indien geconfigureerd — stuurt hij een webhook-notificatie.
+
+## Architectuur overzicht
+
+De codebase is herschreven rond drie componenten:
+
+- **Engine (`qgis_monitor.py`)** bundelt alle hooks, timers en logica in de `MonitorEngine` klasse. De engine beheert loghandlers, watchdog/heartbeat en levert diagnostische snapshots voor de UI.
+- **UI (`plugin.py` en `settings_ui.py`)** bevat een compacte actie-registratie waardoor menu en toolbar consistent blijven. Alle acties loggen naar `QGISMonitorPro.UI` en roepen de engine via kleine helpers aan.
+- **Live viewer (`log_viewer.py`)** tailt het actieve logbestand met een combinatie van `QTimer` en `QFileSystemWatcher` zodat sessiewissels en inactiviteit onmiddellijk zichtbaar zijn.
+
+De hulpfuncties in `utils.py` beheren nu de volledige instellingenset via `SettingSpec`, waardoor typeconversie en defaults gecentraliseerd zijn. Scripts in `scripts/` gebruiken deze helpers om distributies te bouwen zonder binaire artefacten te committen.
