@@ -1,0 +1,4 @@
+# Build artefacts
+qgis_monitor_pro_*.zip
+dist/
+__pycache__/

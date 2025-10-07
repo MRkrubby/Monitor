@@ -2,12 +2,12 @@ import json
 
 # -*- coding: utf-8 -*-
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QPushButton,
+    QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QPushButton,
     QFileDialog, QSpinBox, QDoubleSpinBox, QDialogButtonBox, QGroupBox, QLineEdit, QFormLayout, QTabWidget, QWidget
 )
 from qgis.PyQt.QtCore import Qt, QFile, QTextStream
-from qgis.PyQt.QtGui import QIcon
-from qgis.core import Qgis, QgsApplication
+from qgis.PyQt.QtGui import QIcon, QPalette
+from qgis.core import QgsApplication
 from qgis.PyQt.QtGui import QDesktopServices
 from qgis.PyQt.QtCore import QUrl
 from .utils import get_setting, set_setting, DEFAULTS, export_settings_json, import_settings_json, prune_logs_now, get_log_dir, post_webhook
@@ -169,10 +169,30 @@ class SettingsDialog(QDialog):
         return os.path.join(os.path.dirname(__file__), name)
 
     def _load_style(self):
+        pref = (get_setting("theme", str) or "auto").lower()
+        if pref not in {"auto", "light", "dark"}:
+            pref = "auto"
+
+        theme = pref
+        if pref == "auto":
+            app = QApplication.instance()
+            palette = app.palette() if app else self.palette()
+            try:
+                # QPalette.Window best represents the platform background colour.
+                window_colour = palette.color(QPalette.Window)
+                theme = "dark" if window_colour.lightness() < 128 else "light"
+            except Exception:
+                theme = "light"
+
+        sheet = "style_dark.qss" if theme == "dark" else "style.qss"
+        self._apply_stylesheet(sheet)
+
+    def _apply_stylesheet(self, name: str) -> None:
         try:
-            f = QFile(self._icon_path("style.qss"))
+            f = QFile(self._icon_path(name))
             if f.open(QFile.ReadOnly | QFile.Text):
-                ts = QTextStream(f); self.setStyleSheet(ts.readAll())
+                ts = QTextStream(f)
+                self.setStyleSheet(ts.readAll())
         except Exception:
             pass
 
