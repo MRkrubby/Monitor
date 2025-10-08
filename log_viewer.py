@@ -1,87 +1,290 @@
+"""Live log viewer dock widget.
 
-# -*- coding: utf-8 -*-
-from qgis.PyQt import QtWidgets, QtCore, QtGui
-import os, io
+The widget tails the monitor log(s) and provides an inactivity watchdog so the
+user can tell at a glance when new data arrives.  The implementation avoids
+continuous polling by combining a ``QTimer`` for coarse refreshes with
+``QFileSystemWatcher`` notifications when the underlying file changes.
+"""
+
+from __future__ import annotations
+
+import io
+import os
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Callable, Optional, Tuple
+
+from qgis.PyQt import QtCore, QtGui, QtWidgets
+
+
+@dataclass
+class FileSnapshot:
+    path: str
+    size: int
+    modified: float
+
+
+class _TailSession:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.handle: Optional[io.TextIOBase] = None
+        self.position = 0
+        self.snapshot: Optional[FileSnapshot] = None
+
+    def open(self, reset: bool = False) -> None:
+        if self.handle:
+            try:
+                self.handle.close()
+            except Exception:
+                pass
+        self.handle = io.open(self.path, "r", encoding="utf-8", errors="ignore")
+        if reset:
+            self.position = 0
+        else:
+            self.handle.seek(0, os.SEEK_END)
+            self.position = self.handle.tell()
+        self.snapshot = self._stat()
+
+    def close(self) -> None:
+        if self.handle:
+            try:
+                self.handle.close()
+            except Exception:
+                pass
+        self.handle = None
+        self.snapshot = None
+
+    def _stat(self) -> Optional[FileSnapshot]:
+        try:
+            stat = os.stat(self.path)
+            return FileSnapshot(self.path, stat.st_size, stat.st_mtime)
+        except Exception:
+            return None
+
+    def read_new(self) -> str:
+        if not self.handle:
+            return ""
+        data = self.handle.read()
+        self.position = self.handle.tell()
+        self.snapshot = self._stat()
+        return data
+
 
 class LiveLogDock(QtWidgets.QDockWidget):
-    def __init__(self, parent=None, get_paths=None):
+    def __init__(self, parent=None, get_paths: Optional[Callable[[], Tuple[Optional[str], Optional[str]]]] = None) -> None:
         super().__init__("QGIS Monitor Pro — Live Log", parent)
         self.setObjectName("QGM_LiveLogDock")
         self.setAllowedAreas(QtCore.Qt.LeftDockWidgetArea | QtCore.Qt.RightDockWidgetArea)
-        self._get_paths = get_paths or (lambda: (None, None))
-        self._f = None; self._pos = 0; self._last_size = 0; self._last_path = None
 
-        w = QtWidgets.QWidget(self); self.setWidget(w)
-        lay = QtWidgets.QVBoxLayout(w); lay.setContentsMargins(6,6,6,6); lay.setSpacing(6)
-
-        top = QtWidgets.QHBoxLayout(); lay.addLayout(top)
-        self.cbo_level = QtWidgets.QComboBox(); self.cbo_level.addItems(["ALL","DEBUG","INFO","WARNING","ERROR"])
-        self.txt_filter = QtWidgets.QLineEdit(); self.txt_filter.setPlaceholderText("Filter op tekst of [Tag]")
-        self.chk_auto = QtWidgets.QCheckBox("Auto-refresh"); self.chk_auto.setChecked(True)
-        self.spn_interval = QtWidgets.QDoubleSpinBox(); self.spn_interval.setRange(0.5,10.0); self.spn_interval.setDecimals(1); self.spn_interval.setValue(1.0); self.spn_interval.setSuffix(" s")
-        self.btn_pause = QtWidgets.QPushButton("Pauze"); self.btn_clear = QtWidgets.QPushButton("Clear")
-        self.btn_open = QtWidgets.QPushButton("Open map"); self.btn_pick = QtWidgets.QPushButton("Kies bestand")
-        top.addWidget(QtWidgets.QLabel("Level:")); top.addWidget(self.cbo_level)
-        top.addWidget(self.txt_filter, 1); top.addWidget(self.chk_auto); top.addWidget(self.spn_interval)
-        top.addWidget(self.btn_pause); top.addWidget(self.btn_clear); top.addWidget(self.btn_open); top.addWidget(self.btn_pick)
-
-        self.view = QtWidgets.QPlainTextEdit(); self.view.setReadOnly(True)
-        mono = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
-        self.view.setFont(mono); lay.addWidget(self.view, 1)
-
-        self.lbl = QtWidgets.QLabel("—"); lay.addWidget(self.lbl)
-
-        self.tmr = QtCore.QTimer(self); self.tmr.timeout.connect(self._tick)
-        self._apply_interval(); self.tmr.start()
+        self._resolve_paths = get_paths or (lambda: (None, None))
+        self._session: Optional[_TailSession] = None
+        self._current_path: Optional[str] = None
+        self._last_activity = 0.0
         self._paused = False
 
-        self.chk_auto.toggled.connect(self._toggle_auto)
-        self.spn_interval.valueChanged.connect(self._apply_interval)
-        self.btn_pause.clicked.connect(self._toggle_pause)
-        self.btn_clear.clicked.connect(self.view.clear)
-        self.btn_open.clicked.connect(self._open_folder)
-        self.btn_pick.clicked.connect(self._pick_file)
+        container = QtWidgets.QWidget(self)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
 
-    def _apply_interval(self): self.tmr.setInterval(int(self.spn_interval.value()*1000))
-    def _toggle_auto(self, on): self.tmr.start() if on and not self._paused else self.tmr.stop()
-    def _toggle_pause(self): self._paused = not self._paused; self.btn_pause.setText("Hervat" if self._paused else "Pauze"); self._toggle_auto(self.chk_auto.isChecked())
-    def _open_folder(self):
-        log, _ = self._get_paths()
-        if log and os.path.exists(log): QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(os.path.dirname(log)))
-    def _pick_file(self):
-        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Kies logbestand", "", "Log files (*.log *.txt);;Alle bestanden (*.*)")
-        if p: self._open_file(p, reset=True)
-    def _open_file(self, path, reset=False):
+        controls = QtWidgets.QHBoxLayout()
+        layout.addLayout(controls)
+
+        self.level_combo = QtWidgets.QComboBox()
+        self.level_combo.addItems(["ALL", "DEBUG", "INFO", "WARNING", "ERROR"])
+        self.filter_edit = QtWidgets.QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter op tekst of [Tag]")
+        self.auto_checkbox = QtWidgets.QCheckBox("Auto-refresh")
+        self.auto_checkbox.setChecked(True)
+        self.interval_spin = QtWidgets.QDoubleSpinBox()
+        self.interval_spin.setRange(0.2, 10.0)
+        self.interval_spin.setDecimals(1)
+        self.interval_spin.setSingleStep(0.2)
+        self.interval_spin.setValue(1.0)
+        self.interval_spin.setSuffix(" s")
+        self.pause_button = QtWidgets.QPushButton("Pauze")
+        self.clear_button = QtWidgets.QPushButton("Clear")
+        self.open_button = QtWidgets.QPushButton("Open map")
+        self.pick_button = QtWidgets.QPushButton("Kies bestand")
+
+        controls.addWidget(QtWidgets.QLabel("Level:"))
+        controls.addWidget(self.level_combo)
+        controls.addWidget(self.filter_edit, 1)
+        controls.addWidget(self.auto_checkbox)
+        controls.addWidget(self.interval_spin)
+        controls.addWidget(self.pause_button)
+        controls.addWidget(self.clear_button)
+        controls.addWidget(self.open_button)
+        controls.addWidget(self.pick_button)
+
+        self.view = QtWidgets.QPlainTextEdit()
+        self.view.setReadOnly(True)
+        self.view.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+        layout.addWidget(self.view, 1)
+
+        self.status_label = QtWidgets.QLabel("—")
+        layout.addWidget(self.status_label)
+
+        self.setWidget(container)
+
+        self.refresh_timer = QtCore.QTimer(self)
+        self.refresh_timer.timeout.connect(self._tick)
+        self._apply_interval()
+        self.refresh_timer.start()
+
+        self.watchdog_timer = QtCore.QTimer(self)
+        self.watchdog_timer.setInterval(3000)
+        self.watchdog_timer.timeout.connect(self._watchdog_tick)
+        self.watchdog_timer.start()
+
+        self.fs_watcher = QtCore.QFileSystemWatcher(self)
+        self.fs_watcher.fileChanged.connect(self._on_file_changed)
+        self.fs_watcher.directoryChanged.connect(self._on_directory_changed)
+
+        self.auto_checkbox.toggled.connect(self._toggle_auto)
+        self.interval_spin.valueChanged.connect(self._apply_interval)
+        self.pause_button.clicked.connect(self._toggle_pause)
+        self.clear_button.clicked.connect(self.view.clear)
+        self.open_button.clicked.connect(self._open_folder)
+        self.pick_button.clicked.connect(self._pick_file)
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+
+    def _apply_interval(self) -> None:
+        self.refresh_timer.setInterval(int(self.interval_spin.value() * 1000))
+
+    def _toggle_auto(self, enabled: bool) -> None:
+        if enabled and not self._paused:
+            self.refresh_timer.start()
+        else:
+            self.refresh_timer.stop()
+
+    def _toggle_pause(self) -> None:
+        self._paused = not self._paused
+        self.pause_button.setText("Hervat" if self._paused else "Pauze")
+        self._toggle_auto(self.auto_checkbox.isChecked())
+
+    def _open_folder(self) -> None:
+        path, _ = self._resolve_paths()
+        if path and os.path.exists(path):
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(os.path.dirname(path)))
+
+    def _pick_file(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Kies logbestand",
+            "",
+            "Log files (*.log *.txt);;Alle bestanden (*.*)",
+        )
+        if path:
+            self._switch_file(path, reset=True)
+
+    # ------------------------------------------------------------------
+    # Tail logic
+    # ------------------------------------------------------------------
+
+    def _switch_file(self, path: str, reset: bool = False) -> None:
+        if not path:
+            return
         try:
-            if self._f: 
-                try: self._f.close()
-                except Exception: pass
-            self._f = io.open(path, "r", encoding="utf-8", errors="ignore")
-            self._last_path = path; self._pos = 0 if reset else self._f.seek(0, os.SEEK_END)
-            self._last_size = os.path.getsize(path); self.lbl.setText(f"Bestand: {path}")
-        except Exception as e:
-            self.lbl.setText(f"Kon bestand niet openen: {e}")
-    def _tick(self):
-        if self._paused: return
-        log, _ = self._get_paths()
-        if log and (self._last_path is None or os.path.normpath(log) != os.path.normpath(self._last_path)): self._open_file(log, reset=False)
-        if not self._f and self._last_path: self._open_file(self._last_path, reset=False)
-        if not self._f: return
+            session = _TailSession(path)
+            session.open(reset)
+            self._session = session
+            self._current_path = path
+            self._last_activity = time.time()
+            self._watch_file(path)
+            self._update_status()
+        except Exception as exc:
+            self._session = None
+            self.status_label.setText(f"Kon bestand niet openen: {exc}")
+
+    def _tick(self) -> None:
+        if self._paused:
+            return
+        path, _ = self._resolve_paths()
+        if path and path != self._current_path:
+            if os.path.exists(path):
+                self._switch_file(path, reset=False)
+            else:
+                self._watch_file(path)
+        if not self._session or not self._session.handle:
+            return
+        data = self._session.read_new()
+        if data:
+            self._append_text(data)
+            self._last_activity = time.time()
+            self._update_status()
+
+    def _append_text(self, data: str) -> None:
+        level_filter = self.level_combo.currentText()
+        text_filter = self.filter_edit.text().strip().lower()
+        block = []
+        for line in data.splitlines():
+            if level_filter != "ALL" and f"[{level_filter}]" not in line:
+                continue
+            if text_filter and text_filter not in line.lower():
+                continue
+            block.append(line)
+        if block:
+            cursor = self.view.textCursor()
+            cursor.movePosition(QtGui.QTextCursor.End)
+            cursor.insertText("\n".join(block) + "\n")
+            self.view.verticalScrollBar().setValue(self.view.verticalScrollBar().maximum())
+
+    def _watch_file(self, path: str) -> None:
         try:
-            size = os.path.getsize(self._last_path)
-            if size < self._last_size: self._f.seek(0); self._pos = 0
-            self._last_size = size
-            self._f.seek(self._pos); chunk = self._f.read(); self._pos = self._f.tell()
-            if not chunk: return
-            lines = chunk.splitlines(); lvl = self.cbo_level.currentText(); text_filter = self.txt_filter.text().strip().lower()
-            out=[]; 
-            for ln in lines:
-                ok=True
-                if lvl!="ALL" and f"[{lvl}]" not in ln: ok=False
-                if ok and text_filter and text_filter not in ln.lower(): ok=False
-                if ok: out.append(ln)
-            if out:
-                self.view.appendPlainText("\\n".join(out))
-                self.view.verticalScrollBar().setValue(self.view.verticalScrollBar().maximum())
-        except Exception as e:
-            self.lbl.setText(f"Leesfout: {e}")
+            self.fs_watcher.removePaths(self.fs_watcher.files())
+        except Exception:
+            pass
+        try:
+            self.fs_watcher.removePaths(self.fs_watcher.directories())
+        except Exception:
+            pass
+        if path:
+            directory = os.path.dirname(path) or os.getcwd()
+            if os.path.isdir(directory):
+                self.fs_watcher.addPath(directory)
+            if os.path.exists(path):
+                self.fs_watcher.addPath(path)
+
+    def _on_file_changed(self, path: str) -> None:
+        if self._session and path == self._session.path:
+            self._tick()
+
+    def _on_directory_changed(self, directory: str) -> None:
+        if self._current_path and os.path.dirname(self._current_path) == directory:
+            if os.path.exists(self._current_path):
+                self.fs_watcher.addPath(self._current_path)
+            self._tick()
+
+    # ------------------------------------------------------------------
+    # Status / watchdog
+    # ------------------------------------------------------------------
+
+    def _update_status(self) -> None:
+        if not self._current_path:
+            self.status_label.setText("Geen actief logbestand")
+            return
+        snapshot = self._session.snapshot if self._session else None
+        size = snapshot.size if snapshot else 0
+        timestamp = datetime.fromtimestamp(snapshot.modified).strftime("%H:%M:%S") if snapshot else "—"
+        idle = time.time() - self._last_activity
+        self.status_label.setText(
+            f"{os.path.basename(self._current_path)} — {size:,} bytes — laatst gewijzigd {timestamp} — idle {idle:.1f}s"
+        )
+
+    def _watchdog_tick(self) -> None:
+        if not self._session:
+            return
+        idle = time.time() - self._last_activity
+        if idle > 10:
+            self.status_label.setStyleSheet("color: #d9534f;")
+        else:
+            self.status_label.setStyleSheet("")
+
+
+__all__ = ["LiveLogDock"]
+
