@@ -2,12 +2,12 @@ import json
 
 # -*- coding: utf-8 -*-
 from qgis.PyQt.QtWidgets import (
-    QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QPushButton,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QComboBox, QPushButton,
     QFileDialog, QSpinBox, QDoubleSpinBox, QDialogButtonBox, QGroupBox, QLineEdit, QFormLayout, QTabWidget, QWidget
 )
 from qgis.PyQt.QtCore import Qt, QFile, QTextStream
-from qgis.PyQt.QtGui import QIcon, QPalette
-from qgis.core import QgsApplication
+from qgis.PyQt.QtGui import QIcon
+from qgis.core import Qgis, QgsApplication
 from qgis.PyQt.QtGui import QDesktopServices
 from qgis.PyQt.QtCore import QUrl
 from .utils import get_setting, set_setting, DEFAULTS, export_settings_json, import_settings_json, prune_logs_now, get_log_dir, post_webhook
@@ -80,15 +80,6 @@ class SettingsDialog(QDialog):
         self.heartbeat = QSpinBox(); self.heartbeat.setRange(10, 3600); self.heartbeat.setValue(int(get_setting("heartbeat_sec", int)))
         form_adv.addRow("Heartbeat (sec):", self.heartbeat)
 
-        self.watchdog = QCheckBox("Watchdog logactiviteit bewaken")
-        self.watchdog.setChecked(bool(get_setting("watchdog_enabled", bool)))
-        self.watchdog_idle = QSpinBox(); self.watchdog_idle.setRange(10, 3600)
-        self.watchdog_idle.setValue(int(get_setting("watchdog_idle_sec", int)))
-        row_watch = QWidget(); row_watch_lay = QHBoxLayout(row_watch); row_watch_lay.setContentsMargins(0,0,0,0)
-        row_watch_lay.addWidget(self.watchdog); row_watch_lay.addWidget(QLabel("Tijd (s):"))
-        row_watch_lay.addWidget(self.watchdog_idle); row_watch_lay.addStretch(1)
-        form_adv.addRow("", row_watch)
-
         self.max_mb = QSpinBox(); self.max_mb.setRange(1, 1024); self.max_mb.setValue(int(get_setting("max_log_mb", int)))
         self.rot_bk = QSpinBox(); self.rot_bk.setRange(1, 50); self.rot_bk.setValue(int(get_setting("rot_backups", int)))
         row_rot = QWidget(); row_rot_lay = QHBoxLayout(row_rot); row_rot_lay.setContentsMargins(0,0,0,0)
@@ -155,8 +146,6 @@ class SettingsDialog(QDialog):
         self.json_parallel.setToolTip("Schrijf parallel een JSONL-bestand met rijke context (project, user, sessie).")
         self.scrub.setToolTip("Verberg privé-paden/IP in logregels.")
         self.heartbeat.setToolTip("Schrijf periodiek een 'heartbeat' met RAM/CPU-schatting.")
-        self.watchdog.setToolTip("Waarschuw wanneer er langere tijd geen nieuwe logregels zijn.")
-        self.watchdog_idle.setToolTip("Aantal seconden zonder activiteit voordat de watchdog logt.")
         self.max_mb.setToolTip("Maximale grootte per logbestand (rotatie).")
         self.rot_bk.setToolTip("Aantal bewaarde rotatie-bestanden per logtype.")
         self.prune_start.setToolTip("Voer bij starten automatisch retentie/opschonen uit.")
@@ -180,30 +169,10 @@ class SettingsDialog(QDialog):
         return os.path.join(os.path.dirname(__file__), name)
 
     def _load_style(self):
-        pref = (get_setting("theme", str) or "auto").lower()
-        if pref not in {"auto", "light", "dark"}:
-            pref = "auto"
-
-        theme = pref
-        if pref == "auto":
-            app = QApplication.instance()
-            palette = app.palette() if app else self.palette()
-            try:
-                # QPalette.Window best represents the platform background colour.
-                window_colour = palette.color(QPalette.Window)
-                theme = "dark" if window_colour.lightness() < 128 else "light"
-            except Exception:
-                theme = "light"
-
-        sheet = "style_dark.qss" if theme == "dark" else "style.qss"
-        self._apply_stylesheet(sheet)
-
-    def _apply_stylesheet(self, name: str) -> None:
         try:
-            f = QFile(self._icon_path(name))
+            f = QFile(self._icon_path("style.qss"))
             if f.open(QFile.ReadOnly | QFile.Text):
-                ts = QTextStream(f)
-                self.setStyleSheet(ts.readAll())
+                ts = QTextStream(f); self.setStyleSheet(ts.readAll())
         except Exception:
             pass
 
@@ -258,8 +227,6 @@ class SettingsDialog(QDialog):
         # advanced
         set_setting("scrub_enabled", self.scrub.isChecked())
         set_setting("heartbeat_sec", int(self.heartbeat.value()))
-        set_setting("watchdog_enabled", self.watchdog.isChecked())
-        set_setting("watchdog_idle_sec", int(self.watchdog_idle.value()))
         set_setting("max_log_mb", int(self.max_mb.value()))
         set_setting("rot_backups", int(self.rot_bk.value()))
         set_setting("webhook_url", self.webhook.text().strip())
